@@ -66,7 +66,7 @@ $parser->tmp_to_core	( 1 );
 # if the catcher isn't listening, we can't do anything.
 my $import_host = 'mail';
 my $zimbra_import = IO::Socket::INET->new( PeerHost => $import_host, PeerPort => 42425 )
-	or die "Couldn't locate catcher on $import_hostenon:42425: $@\n";
+	or die "Couldn't locate importer on $import_host:42425: $@\n";
 
 # read the cache file, if any.  We cache results of previous runs so as to avoid
 # exporting duplicated mailboxes.
@@ -93,7 +93,7 @@ $|=1;
 my $ICS_TEMPLATE = <<EOF;
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//Caustic Graphics//Chili Exporter 1.0 MIMEDIR//EN
+PRODID:-//Automagickus//Chili Exporter 1.0 MIMEDIR//EN
 METHOD:PUBLISH
 BEGIN:VTIMEZONE
 TZID:(GMT-08.00) Pacific Time (US & Canada)
