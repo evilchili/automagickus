@@ -1,0 +1,117 @@
+#!/usr/bin/perl
+# pssh 
+#	-- "persistent SSH" wrapper for autossh
+#
+# Copyright 2010 Greg Boyington.  All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without modification, are
+# permitted provided that the following conditions are met:
+# 
+#    1. Redistributions of source code must retain the above copyright notice, this list of
+#       conditions and the following disclaimer.
+# 
+#    2. Redistributions in binary form must reproduce the above copyright notice, this list
+#       of conditions and the following disclaimer in the documentation and/or other materials
+#       provided with the distribution.
+# 
+# THIS SOFTWARE IS PROVIDED BY GREG BOYINGTON ``AS IS'' AND ANY EXPRESS OR IMPLIED
+# WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+# FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> OR
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+# ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+# NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# 
+# The views and conclusions contained in the software and documentation are those of the
+# authors and should not be interpreted as representing official policies, either expressed
+# or implied, of Greg Boyington.
+#
+
+use strict;
+use IO::Socket::INET;
+
+my $host = shift @ARGV or die "usage: $0 [user@]hostname [ SCREEN_LABEL ]\n";
+
+my $autossh_path = 'autossh';
+
+# the port range we should examine
+my @port_range 	= 20000 .. 30000;
+
+# the IP we should try to bind to when checking for unused ports
+my $bind_ip		= '127.0.0.1';
+
+# map to corresponding AUTOSSH_* environment variables
+my %config = (
+	poll			=> undef,
+	gatetime		=> undef,
+	logfile			=> undef,
+	debug			=> undef,
+	path			=> undef,
+);
+my ( $bind, $listen, $open );
+while ( @port_range ) {
+	$open=0;
+	$bind 	= shift @port_range;
+	$listen = shift @port_range or last;
+	for ( $bind, $listen ) {
+		my $socket = IO::Socket::INET->new(
+			PeerAddr	=> $bind_ip,
+			PeerPort	=> $_,
+			Proto		=> 'TCP',
+			Timeout		=> 3
+		);
+		$open++ unless defined $socket;
+		$socket=undef;
+	}
+	last if $open==2;
+}
+die "No available ports detected.\n" unless $open;
+
+# use environment variables to configure autossh
+$ENV{ 'AUTOSSH_'.$_ } = $config{ $_} foreach grep { defined $config{$_} } keys %config;
+
+# use a unique label for this screen session
+my $label = shift @ARGV || getpwuid( $> ) . $bind;
+
+# invoke autossh
+my $cmd = sprintf( q( %s -M %d -t %s "screen -e^Zz -D -R -S %s"), $autossh_path, $bind, $host, $label );
+exec $cmd;
+
+=head1	NAME
+
+pssh - create a 'persistent' ssh connection with autossh and screen
+
+=head1 SYNOPSIS
+
+pssh user@hostname
+
+=head1 DESCRIPTION
+
+pssh is a small script that manages autossh and screen for "persistent" SSH sessions.  It searches a 
+given port range looking for two consecutive available ports, and passes them to autossh.  autossh 
+takes care of monitoring the SSH connection and reconnecting to the remote screen session as needed.  
+
+Screen sessions are labeled (via -S) with the effective username and the local port being used, so 
+one can correlate existing screen sessions on the remote host with the local autossh processes.  You 
+can force screen to reattach to an existing session by specifying the label when calling pssh:
+
+pssh user@hostname joe20004
+
+=head1 SEE ALSO
+
+autossh, ssh
+
+=head1 AUTHOR
+
+pssh was written by Greg Boyington <greg@automagick.us>, inspired by the 'rscreen' script that ships 
+with autossh.
+
+=head1 COPYRIGHT NOTICE
+
+Copyright 2010 Greg Boyington.  All rights reserved.  
+
+pssh is distributed under the Simplified BSD License; see file header for details.
+
+=cut
