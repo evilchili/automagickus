@@ -1,0 +1,85 @@
+#! /usr/bin/perl -w
+#
+# check_syslog -- check for trouble in syslog entries
+#
+# author: <greg@automagick.us>
+# 
+
+use strict;
+use Getopt::Long;
+use vars qw($opt_h $opt_d $opt_f $opt_w $opt_c);
+use vars qw($PROGNAME);
+use lib "/usr/local/libexec/nagios" ;
+use Unix::Process;
+use utils qw(%ERRORS $TIMEOUT &print_revision &support &usage);
+use IO::Socket;
+
+$PROGNAME = "check_syslog";
+
+my $PS_FIELD_NAME = 'command';
+	
+sub print_usage () {
+		print <<EOF;
+Usage: $PROGNAME  [ -h ] class
+
+-h     Display this message.
+class  Class of errors to request
+EOF
+}
+
+sub print_help () {
+	print_revision($PROGNAME,'$Revision: 1.0 $ ');
+	print "\n Nagios plugin for checking syslog for important messages.\n";
+	print_usage();
+}
+
+MAIN: {
+	Getopt::Long::Configure('bundling');
+	GetOptions (
+		"h"		=> \$opt_h, 'help' 		=> \$opt_h,
+	);
+	if ($opt_h) {
+		print_revision($PROGNAME, '$Revision: 1.0 $ ');
+		print <<EOF;
+Copyright (c) 2003 Greg Boyington
+
+Nagios plugin for checking syslog for important messages.
+
+EOF
+		print_usage();
+		exit $ERRORS{'OK'};
+	}
+
+	# Just in case of problems, let's not hang Nagios
+	$SIG{'ALRM'} = sub {
+		print "Somthing is Taking a Long Time, Increase Your TIMEOUT (Currently Set At $TIMEOUT Seconds)\n";
+		exit $ERRORS{"UNKNOWN"};
+	};
+	
+	alarm($TIMEOUT);
+
+	my $class = lc $ARGV[0];
+	$class =~ s/\W//g;
+	if ( ! $class ) {
+		print "You must specify a message class\n";
+		exit $ERRORS{'UNKNOWN'};
+	}
+
+	my $syslog = IO::Socket::INET->new( Proto => "tcp", PeerAddr => 'localhost', PeerPort => 30080 )
+		or die "Couldn't connect to syslog_monitor: $!";
+		
+	$/=undef;
+	$syslog->autoflush(1);
+	print $syslog $class."\n";
+	my $log = <$syslog>;	
+	close $syslog;
+
+	if ( $log ) {
+		print "WARNING: syslog reports $log";
+		exit $ERRORS{'WARNING'};
+	} 
+
+	print "OK: Nothing to report.\n";
+	exit $ERRORS{'OK'};
+
+}
