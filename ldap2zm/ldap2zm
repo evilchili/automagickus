@@ -1,0 +1,274 @@
+#!/usr/bin/perl
+
+=pod
+=head1 NAME
+
+ldap2zm	 - create zimbra accounts for LDAP users
+
+=head1 SYNOPSIS
+
+usage: ldap2zm -h host -b 'base' [ options ]
+
+Switches:
+  -h    LDAP hostname
+  -b    LDAP search base
+
+Options:
+  -v    enable verbose output
+  -u    username for LDAP bind
+  -p    LDAP for LDAP bind
+  -f    LDAP search filter (default: '(objectclass=*)' )
+  -l    list users found in LDAP search; take no other action
+
+=head1 DESCRIPTION
+
+*** WARNING! THIS SCRIPT WILL DESTROY EXISTING MAILBOXES!
+
+ldap2zm will create accounts in zimbra for every user it finds in the specified LDAP server.
+Existing accounts are purged from zimbra at the start of each run, so DO NOT RUN THIS ON A 
+PRODUCTION ZIMBRA SERVER!  Don't say I didn't warn you. :)
+
+=head1 EXAMPLE
+
+The following command would create zimbra accounts for all employees of example.com who are members of the 
+'Zimbra Users' group on the hypothetical Active Directory server 'adserver', using the administrator's 
+credentials:
+
+ ldap2zm -h adserver -u administrator -p s3cr3t -b "DC=example,DC=com" \ 
+     -f '(memberOf=CN=Zimbra Users,OU=Employees,DC=example,DC=com)'
+
+=head1 AUTHOR
+
+  Greg Boyington <greg@automagick.us>
+
+=head1 SEE ALSO
+
+  http://wiki.zimbra.com/index.php?title=Bulk_Provisioning
+
+=cut
+
+use strict;
+use Data::Dumper;
+use String::MkPasswd qw(mkpasswd);
+use IPC::Open3;
+use IO::Select;
+use Net::LDAP;
+use Getopt::Std;
+
+$|=1;
+
+use vars qw/$VERSION $VERBOSE %opt $zmprov_cmd $zmcontrol_cmd/;
+
+# set up usage info
+$VERSION=0.5;
+sub main::VERSION_MESSAGE { print $0.', version '.$main::VERSION."\n" }
+sub main::HELP_MESSAGE    { print "For usage details please run:\n\tperldoc -F $0\n" }
+$Getopt::Std::STANDARD_HELP_VERSION = 1;
+
+# zimbra executables
+$zmprov_cmd = '~zimbra/bin/zmprov';
+$zmcontrol_cmd = '~zimbra/bin/zmmailboxdctl';
+
+# ensure the 'zimbra' user is running the show
+unless ( ( getpwuid( $< ) )[0] eq 'zimbra' ) {
+	print "You must run this script as the 'zimbra' user.\n";
+	exit 1;
+}
+
+# process command-line switches
+getopts('vh:u:p:b:f:l',\%opt);
+$VERBOSE = $opt{'v'} ? 1 : 0;
+die "You must specify your LDAP host with -h.\n"
+	unless $opt{'h'};
+die "You must specify your LDAP base with -b.\n"
+	unless $opt{'b'};
+
+unless ( $opt{'f'} ) {
+	$opt{'f'} = q/(objectclass='*')/;
+	warn qq/Warning: using default LDAP filter "$opt{'f'}"; override with -f.\n/;
+}
+
+# create the ldap object and bind to the LDAP server
+my $ldap = Net::LDAP->new( $opt{'h'} ) or die $@;
+my $msg = $ldap->bind( $opt{'u'} ? ( $opt{'u'}, password => $opt{'p'} ) : () );
+$msg->code && die $msg->error;
+
+# get a list of all users in the AD
+print "Loading LDAP users...";
+my %users = &search( $ldap, base => $opt{'b'}, filter => $opt{'f'} );
+print "OK.\n";
+
+# no users? no work.
+if ( ! scalar keys %users ) {
+	warn "No LDAP users found; aborting.\n";
+	exit 1;
+}
+
+print "Found " . scalar(keys %users) . " LDAP users to (re)create. Continue (y/N)? ";
+my $a = <STDIN>;
+unless ( $a =~ /^\s*y/i ) {
+	print "Aborted!\n";
+	exit;
+}
+
+# pass every user to the gen_zmprov_command() routine to prepare the 
+# user for a new zimbra account.  We also prepare the list of deleteAccount
+# commands.
+my @lines;
+foreach ( sort keys %users ) {
+	$users{ $_ } = &gen_zmprov_command( user => $users{ $_ } );
+	push @lines, "da '$users{ $_ }->{'_address'}'\n";
+}
+
+# List the users we found and bail, if the -l command-line switch is on.  We do this
+# after the passing the results through gen_zmprov_command so we have the _address 
+# to display.
+if ( $opt{'l'} || $VERBOSE ) {
+	print "The following users will be (re)created in zimbra:\n";
+	printf '%-40s %s  %s'."\n", $users{ $_ }->{'cn'}[0], $users{ $_ }->{'_address'}, $users{ $_ }->{'_password'}
+		foreach sort keys %users;
+}
+exit if $opt{'l'};
+
+# Now we modify zimbra...
+
+# deprovision existing accounts
+print "Deleting existing accounts...";
+&zmprov(@lines);
+print "OK.\n";
+
+# restart mailboxd, to force the account cache to be cleared 
+print "Restarting mailboxd...";
+print `$zmcontrol_cmd restart`;
+
+print "Pausing to allow server restart...";
+sleep 3;
+print "OK.\n";
+
+# create new accounts
+print "Creating new accounts...";
+@lines = map { $users{ $_ }->{'_cmd'} } sort keys %users;
+&zmprov(@lines);
+print "OK.\nRecreated " . scalar( keys %users ) . " accounts.\n";
+
+# all done!
+exit;
+
+#
+# SUB-ROUTINES 
+#
+
+# search( %param_hash )
+# 
+# Execute an LDAP search and return the results as a hash.
+#
+# Any args to Net::LDAP::search() may be passed as part of %param_hash; 
+# if it exists, the 'index_attr' param specifies which LDAP attribute to 
+# use as the key for the resulting %users hash.
+# 
+sub search {
+	my $ldap = shift;
+	my %args = @_;
+
+	my $index_attr = delete $args{'index_attr'} || 'userprincipalname';
+
+	# establish some defaults
+	$args{'attrs'} 	||= [ 'cn', 'userPrincipalName', 'memberOf', 'givenName', 'sn' ];
+	$args{'scope'}	||= 'sub';
+
+	# do the search
+	my $result = $ldap->search( %args );
+
+	my %users;
+
+	# rejigger the results into a useful format
+	my $href = $result->as_struct;
+	foreach ( keys %$href ) {
+		my $valref = $$href{$_};
+		my $this;
+		foreach my $attr ( sort keys %$valref ) {
+			next if $attr =~ /;binary$/; # ignore any binary data
+			$this->{ lc $attr } = @$valref{ $attr };
+		}
+
+		# add this user to the users hash
+		$users{ $this->{ lc $index_attr }[0] } = $this;
+	}
+	
+	return %users;
+}
+
+# gen_zmprov_command( user => $hashref )
+#
+# Determine the email address of the zimbra account to 
+# create for the given LDAP user, and generate a createAccount
+# command for zmprov.  These are added to the hashref as _address
+# and _cmd, respectively, and the whole thing is returned.
+#
+sub gen_zmprov_command {
+	my %args = @_;
+	my $user = delete $args{'user'};
+
+	# we authenticate against AD, so the local zimbra password is irrelevant; 
+	# we'll generate difficult passwords just to be on the safe side.
+	#$user->{'_password'} = mkpasswd( -length => 12 );
+	$user->{'_password'} = 'change$me';
+
+	# our AD server manages internal.example.com, but we want email addresses
+	# to be in the example.com domain, so we fix up the address here.  Your 
+	# setup (and AD schema) may vary.
+	my $address = $user->{'userprincipalname'}[0];
+	$address =~ s/internal\./mail\./;
+	
+	$user->{'_address'} = $address;
+
+	# build the createAccount command to be sent to zmprov.
+	$user->{'_cmd'} = qq(createAccount '$address' ) . 
+					  qq('$user->{'_password'}' ) . 
+					  qq(displayName '$user->{'cn'}[0]' ) . 
+					  qq(givenName '$user->{'givenname'}[0]' ) . 
+					  qq(sn '$user->{'sn'}[0]'\n);
+
+	# return the modified hashref
+	return $user;
+}
+
+# zmprov( @commands )
+# 
+# execute zmprov and feed it a list of commands
+# 
+sub zmprov {
+
+	# start the zmprov process and capture its filehandles
+	my $pid = open3(\*WRITE, \*READ, \*ERROR, $zmprov_cmd)
+		or die "Couldn't open pipe to $zmprov_cmd: $!";
+
+	# use IO::Select to poll zmprov's STDERR
+	my $sel = new IO::Select();	
+	$sel->add(\*READ);
+	$sel->add(\*ERROR);
+
+	# send every command we've been given to zmprov and watch for errors.
+	foreach ( @_ ) {
+
+		# report what we're doing as we do it, if we're being verbose
+		print $_ if $VERBOSE;
+
+		# send the command to zmprov
+		print WRITE $_;
+
+		# watch for a response on STDERR
+		foreach my $h ( $sel->can_read ) {
+			my $buf='';
+			if ( $h eq \*ERROR ) {
+
+				# XXX: should we abort if we get an error?
+				sysread(ERROR,$buf,4096);
+				warn "ERROR ( $_ ): $buf\n" if $buf;
+			}
+		}
+	}
+
+	# no zombies
+	waitpid($pid,1);
+}
