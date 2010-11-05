@@ -1,0 +1,165 @@
+#!/usr/bin/perl
+#
+# syslog_monitor 
+#	-- watch syslog data via a FIFO and echo relevant data to TCP clients
+#
+
+use strict;
+use POSIX;
+use POSIX qw(setsid);
+use Fcntl;
+use Data::Dumper;
+use IO::Socket;
+
+my $VERSION = '1.1';
+
+$|=1;
+
+my $verbose = 0;
+my %buffer;
+my @clients;
+
+print "$0 v$VERSION ";
+if ( $ARGV[0] eq '-d' ) {
+	print "running in debug mode.\n";
+	$verbose=1;
+} else {
+	print "becoming a daemon...\n";
+	defined( my $pid = fork() ) or die "Couldn't fork: $!";
+	exit if $pid;
+	setsid()	or die "Couldn't start a new session: $!";
+}
+
+
+# TCP port on which to listen for incoming connections
+my $port = 30080;
+
+# location of the syslog pipe
+my $PIPE = '/var/log/messages.pipe';
+
+# limit the per-test buffer to 1mb each 
+my $MAX_BUFFER_SIZE = 1024 * 1024;
+
+# regular expressions against which to test syslog data
+my %regex = (
+	'\btest\b', 				=> 'test',
+	'exited.*signal\s+\d+'		=> 'cores',
+	'swap_pager:\sI\/O\serror' 	=> 'swap',
+);
+
+# handle HUPs and CHLDs
+my $sigset = POSIX::SigSet->new();
+my $action = POSIX::SigAction->new('HUP_handler', $sigset, &POSIX::SA_NODEFER);
+POSIX::sigaction(&POSIX::SIGHUP, $action);
+sub HUP_handler {
+	warn "HUP received; restarting\n" if $verbose;
+	close($_->{'socket'}) foreach ( @clients );
+	exec($0, @ARGV) or die "Couldn't restart: $!";
+}
+
+# Create the named pipe for syslogd to write to.  We have to HUP syslogd 
+# once this is complete, otherwise syslog won't log to the pipe.
+unless (-p $PIPE) { 
+	if (-e _) { 
+		unlink $PIPE or die "Couldn't remove existing file: $!";
+	} 
+	POSIX::mkfifo($PIPE, 0666) or die "Can't create our pipe"; 
+	warn "created $PIPE as a named pipe\n" if $verbose; 
+}
+sysopen(SYSLOG,$PIPE, O_NONBLOCK|O_RDONLY) or die "Couldn't open $PIPE: $!";
+
+# HUP syslog 
+warn "HUPing syslog\n" if $verbose;
+my $ps = `ps -x |grep syslogd`;
+my ($syslog_pid) = ( $ps =~ /^\s*(\d+)\b/ );
+die "Couldn't locate syslog process!" unless $syslog_pid;
+kill(1, $syslog_pid) or die "Couldn't HUP syslogd ($syslog_pid): $!";
+
+warn "Setting up server\n" if $verbose;
+
+# set up the non-blocking TCP server
+my $server = IO::Socket::INET->new( 
+		Proto 		=> 'tcp', 
+		LocalAddr 	=> 'localhost', 
+		LocalPort 	=> $port, 
+		Listen 		=> 1, 
+		Blocking	=> 0,
+		Reuse => 1 ) or die "Couldn't create TCP socket: $!";
+
+warn "Listening on localhost:$port\n" if $verbose;
+
+warn "All set.  Starting main loop.\n" if $verbose;
+
+while (1) {
+
+	# accept new connections
+	if ( my $client = $server->accept() ) {
+		warn "Received a client connection.\n" if $verbose;
+		$client->autoflush(1);
+		push ( @clients, { socket => $client, started => time } );
+	}
+
+	# step through each client connection, looking for requests
+	my @newclients=();
+	warn "Polling ".scalar(@clients)." clients\n" if $verbose;
+	foreach my $c ( @clients ) {
+		my $req = '';
+		my $buf = '';
+		$req .= lc $buf while sysread( $c->{'socket'}, $buf, 4096 );
+		$req =~ s/\W//g;
+		if ( $req ) {
+			warn "Client has asked for '$req'\n" if $verbose;
+
+			my $socket = delete $c->{'socket'};
+
+			# step through the regexes and look for the one the client 
+			# has requested.  If we find it, send any buffered data we have.
+			foreach my $r ( map { lc } keys %regex ) {
+				warn "Comparing '".$regex{$r}."' and '$req'\n" if $verbose;	
+				if ( $regex{$r} eq $req ) {
+					warn "Sending client the following from buffer: ".$buffer{ $regex{$r} }."\n" if $verbose;
+					if ( exists $buffer{ $regex{$r} } ) {
+						print $socket join( "\n", @{ delete  $buffer{ $regex{$r} } } ); 
+						last;
+					}
+				}
+			}
+			# clients only get one chance, so hang up.
+			close $c->{'socket'};
+		} 
+		# if there was no request, remember to poll this client next time.
+		push (@newclients, $c) if exists $c->{'socket'};
+	}
+	@clients = @newclients;
+
+	# check for incoming syslog data 
+	#warn "Checking for waiting data on named PIPE\n";
+	my ($buf,$data);
+	$data .= $buf while sysread(SYSLOG,$buf,8192);
+	if ( defined($data) ) {
+
+		# check each syslog line against each regex,
+		# and add any that match to the buffer.
+		#
+		foreach my $l ( split /\n/,$data ) {
+			foreach my $r (keys %regex) {
+				warn "Checking data against $r\n" if $verbose;
+				if ( $l =~ /$r/i ) {
+	
+					warn "Matched on /$r/: $l\n" if $verbose;
+	
+					# make sure we don't chew up too much memory by discarding the 
+					# oldest lines from syslog until the buffer is an acceptable size.
+					my $len = exists $buffer{ $regex{$r} } ? length(join('',@{ $buffer{ $regex{$r} } } ) ) : 0;
+					while ( $len + length($l) >= $MAX_BUFFER_SIZE ) {
+						shift @{ $buffer{ $regex{$r} } };
+					} 
+					push(@{ $buffer{ lc $regex{$r} } },$l);
+					last;
+				}
+			}
+		}
+	}
+	sleep 1;
+
+}
