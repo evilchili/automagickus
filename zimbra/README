@@ -1,0 +1,1 @@
+This directory contains some tools I put together during a horrendous migration from a thoroughly-broken hosted Microsoft Exchange Server to a local Zimbra installation.  I didn't have enough access to the Exchange Server to actually perform an export, so I had to Get Creative(tm).
