@@ -1,0 +1,17 @@
+RT-dispatcher is a small utility that acts as pre-processor for Request 
+Tracker email.  In the dark ages, the RT installation in my organization
+was stuck behind a hosted POP3 server which we had little control over.
+Since we couldn't set up aliases on the mailserver that directly invoked
+RT-mailgate, we instead created aliases for all the queue addresses and
+pointed them to a single POP3 account.  This account was monitored via
+fetchamil, which invoked dispatcher.pl.
+
+The dispatcher.pl script parses mail headers to determine the queue to
+which a given message should be routed, and appropriately invokes
+rt-mailgate to deliver the message to RT.  It supports multiple domains
+and subdomains, so you can deliver (eg) webmaster@foo.com and
+webmaster@bar.com to different RT queues, or the same queue, as you
+please.  Spam is automatically shunted to a _SPAM_ queue, and mail not
+addressed to a valid queue address can be bounced, logged or rerouted to
+another queue for review.
+
