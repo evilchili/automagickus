@@ -1,0 +1,69 @@
+#!/bin/bash
+#
+# squeezesync
+#	-- watch a local itunes installation for changes and sync them to a 
+#	   remote squeezeboxserver using rsync.
+#
+# author: <greg@automagick.us>
+#
+# Requires: ssh, rsync, curl
+
+#### LOCAL ITUNES CONFIGURATION ####
+
+USER=greg
+ITUNES_DIR=/Users/${USER}/Music/iTunes
+MUSIC_DIR=${ITUNES_DIR}/iTunes\ Music
+ITUNES_XML=${ITUNES_DIR}/iTunes\ Music\ Library.xml
+
+
+#### REMOTE SQUEEZEBOXSERVER CONFIGURATION ####
+
+# Note: configure SSH to allow a login by this user without a password.
+REMOTE_USER=greg
+REMOTE_HOST=garrett
+
+# where should the tracks be synced to?
+REMOTE_MUSIC=/usr/local/music/music
+
+# where should the iTunes Library XML file be synced to?
+REMOTE_LIBRARY=/usr/local/music/itunesdb
+
+# the URL for the squeezeboxserver (needed to force a rescan)
+SQZBOX_URL=http://garrett:9000
+
+# How long the script should wait before checking for changes, in seconds.
+SLEEP_INTERVAL=30
+
+
+#### MAIN LOOP (THE WORKIN' OVERTIME PART) ####
+
+cd "${MUSIC_DIR}"
+while true; do 
+
+	# Create a string representing the state of the iTunes library. 
+	# We do this by tracking total disk usage and a checksum of the
+	# directory listing.  This ensures we notice any change to the
+	# directory structure, even ones (like renames) that don't change
+	# total disk usage, as well as solving a race condition for files
+	# being modified while the sync runs.  Finally, we checksum the
+	# iTunes XML file to detect changes to playlists and other metadata.
+	#
+	i="`du |tail -1|cut -f1` `find . |cksum` `cksum \"${ITUNES_XML}\"|cut -f1 -d\ `" 
+
+	# Compare the current state of the iTunes library ($i) to the previous state ($j).
+	if [[ $i != $j ]]; then 
+
+		# changes were detected, so use rsync to update the squeezebox library
+		rsync -av --delete "${MUSIC_DIR}/" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_MUSIC}"
+
+		# copy the iTunes Music Library.xml file so playlists and such are preserved.
+		rsync -qav "${ITUNES_XML}" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_LIBRARY}"
+
+		# request a rescan of the squeezecenter library
+		curl -so /dev/null "${SQZBOX_URL}/status.html?p0=rescan"
+	fi
+
+	# remember the current state of the library for the next check, and wait 30 seconds.
+	j="$i"
+	sleep ${SLEEP_INTERVAL}
+done

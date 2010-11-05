@@ -1,0 +1,2 @@
+squeezesync is a small bash script that watches your iTunes directory and pushes changes 
+to a remote squeezeboxserver installation to keep the two in sync.

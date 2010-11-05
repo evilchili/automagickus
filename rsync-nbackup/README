@@ -1,0 +1,13 @@
+rsync-backup.pl uses rsync over ssh to perform backups of remote systems.  
+It supports multiple host definitions, allowing you to specify unique 
+remote paths, exclusions, local backup targets and so on.  You can even 
+mount a filesystem before starting the backup, and unmount it upon 
+completion (dangerous for multiuser environments, but handy for toasters).
+
+rsync-backup.pl is designed to be run from cron, for multiple daily
+backups and optional archiving of daily, weekly and monthly snapshots.
+Snapshots are done via hard links, so disk usage is minimal, and since
+rsync only transfers changes since the last run, and uses compression to
+boot, bandwidth requirements are light too.
+
+perldoc rsync-backup.pl for complete documentation.

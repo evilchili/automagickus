@@ -1,0 +1,6 @@
+Soop is a process supervisor along the lines of djb's daemontools.  It will fork a child, 
+execute the given process, and restart it whenever it exits.  Soop can also run 
+user-defined tests at a preset interval to determine whether or not the child process 
+should be stopped or restarted.  Logging is done to STDERR or syslog, user's choice. 
+
+perldoc Soop.pm for complete documentation.
