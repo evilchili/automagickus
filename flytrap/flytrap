@@ -1,0 +1,107 @@
+#!/bin/bash
+#
+# flytrap
+#	-- share a local directory structure with multiple remote clients via a cloud
+#
+# author: <greg@automagick.us>
+#
+# Requires: ssh, rsync, curl
+#
+# Copyright 2010 Greg Boyington.  All rights reserved.
+# 
+# Redistribution and use in source and binary forms, with or without modification, are
+# permitted provided that the following conditions are met:
+# 
+#    1. Redistributions of source code must retain the above copyright notice, this list of
+#       conditions and the following disclaimer.
+# 
+#    2. Redistributions in binary form must reproduce the above copyright notice, this list
+#       of conditions and the following disclaimer in the documentation and/or other materials
+#       provided with the distribution.
+# 
+# THIS SOFTWARE IS PROVIDED BY GREG BOYINGTON ``AS IS'' AND ANY EXPRESS OR IMPLIED
+# WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+# FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL GREG BOYINGTON OR
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+# ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+# NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# 
+# The views and conclusions contained in the software and documentation are those of the
+# authors and should not be interpreted as representing official policies, either expressed
+# or implied, of Greg Boyington.
+#
+
+# what local directory will we be syncing?
+DIR=${HOME}
+
+HOSTNAME=`hostname`
+LOCKFILE=".flytrap-lastsync"
+LOGFILE=".flytrap-log-${HOSTNAME}"
+
+# Note: configure SSH to allow a login by this user without a password.
+REMOTE_USER=venus
+REMOTE_HOST=cloudserver
+
+# where the synced directory lives on the remote system.
+REMOTE_DIR=flytrap/${DIR}
+
+# How long the script should wait before checking for changes, in seconds.  Note that 
+# the maximum possible duration that multiple clients will be out of sync is this 
+# value times the number of clients sharing the directory plus round-trip transit times.
+SLEEP_INTERVAL=30
+
+# extra options to be used with rsync; '-a --delete' is non-optional.
+RSYNC_OPTIONS='-zv --rsync-path=/opt/bin/rsync'
+
+#### MAIN LOOP (THE WORKIN' OVERTIME PART) ####
+
+# ensure the lockfile exists and pick up previous sync id, if there is one 
+touch "${DIR}/${LOCKFILE}"
+local_syncid="`cat ${DIR}/${LOCKFILE}`"
+
+# initialize the logfile
+echo "[ `date` ] flytrap starting up." > "${DIR}/${LOGFILE}"
+
+cd "${DIR}"
+while true; do 
+
+	# poll the server to find out when the last sync operation was performed
+	remote_syncid="`ssh ${REMOTE_USER}@${REMOTE_HOST} \"cat ${REMOTE_DIR}/${LOCKFILE}\" 2>>${DIR}/${LOGFILE}`"
+
+	# a sync operation was performed that wasn't us, so grab the changes and sync them locally
+	if [[ $remote_syncid != $local_syncid ]]; then
+		echo "[ `date` ] Remote changes detected; updating local copy." >> "${DIR}/${LOGFILE}"
+		rsync -a --delete ${RSYNC_OPTIONS} "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/" "${DIR}" 2>&1 >> "${DIR}/${LOGFILE}"
+		local_syncid=$remote_syncid
+		echo $local_syncid > "${DIR}/${LOCKFILE}"
+	fi
+
+	# Create a string representing the state of the target directory.
+	# We do this by tracking total disk usage and a checksum of the
+	# directory listing.  This ensures we notice any change to the
+	# directory structure, even ones (like renames) that don't change
+	# total disk usage, as well as solving a race condition for files
+	# being modified while the sync runs.
+	#
+	i="`du |tail -1|cut -f1` `find . |cksum`" 
+
+	# Compare the current state of the homedir ($i) to the previous state ($j).
+	if [[ $i != $j ]]; then 
+
+		echo "[ `date` ] Local changes detected; updating remote copy." >> "${DIR}/${LOGFILE}"
+
+		# remember when this sync occurred 
+		local_syncid="`hostname` `date -u +%s`"
+		echo $local_syncid > "${DIR}/${LOCKFILE}"
+
+		# update the remote copy
+		rsync -a --delete ${RSYNC_OPTIONS} "${DIR}/" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}" 2>&1 >> "${DIR}/${LOGFILE}"
+	fi
+	j=$i
+
+	# remember the current state of the library for the next check, and wait 30 seconds.
+	sleep ${SLEEP_INTERVAL}
+done

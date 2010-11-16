@@ -1,0 +1,9 @@
+flytrap is a dropbox-like utility that shares a directory structure with
+two or more remote clients by rsyncing changes to and from a server.
+The server copy is always considered golden, so new clients will
+download a changeset from the server when added to the pool.  After that
+all local changes are sent to the server.  flytrap is ideal for sharing
+a home directory between client machines where NFS or other traditional
+filesharing isn't an option, eg. mobile devices without constant network
+connectivity.
+
