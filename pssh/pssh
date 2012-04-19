@@ -53,14 +53,14 @@ my %config = (
 my ( $bind, $listen, $open );
 while ( @port_range ) {
 	$open=0;
-	$bind 	= shift @port_range;
-	$listen = shift @port_range or last;
+	$bind 	= splice( @port_range, int rand $#port_range, 1);
+	$listen = splice( @port_range, int rand $#port_range, 1) or last;
 	for ( $bind, $listen ) {
 		my $socket = IO::Socket::INET->new(
 			PeerAddr	=> $bind_ip,
 			PeerPort	=> $_,
 			Proto		=> 'TCP',
-			Timeout		=> 3
+			Timeout		=> 5
 		);
 		$open++ unless defined $socket;
 		$socket=undef;
@@ -69,6 +69,8 @@ while ( @port_range ) {
 }
 die "No available ports detected.\n" unless $open;
 
+#print "Ports $bind and $listen are available.\n";
+
 # use environment variables to configure autossh
 $ENV{ 'AUTOSSH_'.$_ } = $config{ $_} foreach grep { defined $config{$_} } keys %config;
 
@@ -76,7 +78,8 @@ $ENV{ 'AUTOSSH_'.$_ } = $config{ $_} foreach grep { defined $config{$_} } keys %
 my $label = shift @ARGV || getpwuid( $> ) . $bind;
 
 # invoke autossh
-my $cmd = sprintf( q( %s -M %d -t %s "screen -e^Zz -D -R -S %s"), $autossh_path, $bind, $host, $label );
+my $cmd = sprintf( q( %s -M %d -t %s "screen -D -R -S %s"), $autossh_path, $bind, $host, $label );
+warn $cmd;
 exec $cmd;
 
 =head1	NAME
